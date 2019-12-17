@@ -34,6 +34,7 @@ import net.daporkchop.lib.nbt.NBTInputStream;
 import net.daporkchop.lib.nbt.NBTOutputStream;
 import net.daporkchop.lib.nbt.alloc.NBTArrayAllocator;
 import net.daporkchop.lib.nbt.tag.notch.CompoundTag;
+import net.daporkchop.lib.nbt.tag.notch.ListTag;
 
 import java.io.File;
 import java.nio.channels.FileChannel;
@@ -110,7 +111,7 @@ public class Main {
                                     continue;
                                 }
                                 inflatedChunk.clear();
-                                ByteBuf chunk = region.readDirect(x, z).skipBytes(1);
+                                ByteBuf chunk = region.readDirect(x, z).markReaderIndex().skipBytes(1);
                                 try {
                                     inflater.inflate(chunk, inflatedChunk);
                                     inflater.reset();
@@ -139,13 +140,14 @@ public class Main {
 
                                         //update chunk length in bytes now that it is known
                                         out.setInt(oldIndex, out.writerIndex() - oldIndex - 4);
+                                        logger.info("New size: %d bytes", out.writerIndex() - oldIndex - 4);
                                     } else {
                                         //simply write compressed chunk straight to output buffer
-                                        out.writeInt(chunk.readableBytes());
+                                        out.writeInt(chunk.resetReaderIndex().readableBytes());
                                         out.writeBytes(chunk);
                                     }
 
-                                    //write chunk to buffer
+                                    //pad chunk
                                     out.writeBytes(RegionConstants.EMPTY_SECTOR, 0, ((out.writerIndex() - 1 >> 12) + 1 << 12) - out.writerIndex());
 
                                     final int chunkSectors = (out.writerIndex() - 1 >> 12) + 1;
@@ -182,7 +184,24 @@ public class Main {
 
     protected static boolean processChunk(@NonNull CompoundTag chunk) {
         boolean dirty = false;
-        //TODO: something
+        {
+            //iterate over entities to find item frames
+            ListTag<CompoundTag> entities = chunk.getCompound("Level").getList("Entities");
+            for (int i = 0, size = entities.size(); i < size; i++)  {
+                CompoundTag entity = entities.get(i);
+                if ("minecraft:item_frame".equals(entity.getString("id"))) {
+                    CompoundTag item = entity.getCompound("Item");
+                    if (item == null)   {
+                        //logger.info("Found item frame with no item?!?");
+                        continue;
+                    } else if ("minecraft:filled_map".equals(item.getString("id")))    {
+                        //logger.info("Found map id=%d in item frame!", item.getShort("Damage"));
+                        //TODO: this
+                        dirty = true;
+                    }
+                }
+            }
+        }
         return dirty;
     }
 }
