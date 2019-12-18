@@ -57,7 +57,7 @@ import static net.daporkchop.lib.logging.Logging.*;
  * @author DaPorkchop_
  */
 public class Main {
-    protected static final Pattern INPUT_PATTERN  = Pattern.compile("([0-9]+):([0-9]+)(\n|$)");
+    protected static final Pattern INPUT_PATTERN  = Pattern.compile("([0-9]+):([0-9]+)(\r?\n|$)");
     protected static final Pattern DIM_PATTERN    = Pattern.compile("^(region|DIM-?[0-9]+)$");
     protected static final Pattern REGION_PATTERN = Pattern.compile("^r\\.(-?[0-9]+)\\.(-?[0-9]+)\\.mca$");
 
