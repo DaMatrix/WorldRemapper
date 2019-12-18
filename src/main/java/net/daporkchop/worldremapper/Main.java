@@ -47,6 +47,7 @@ import java.nio.MappedByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.file.StandardOpenOption;
 import java.util.Arrays;
+import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -227,15 +228,22 @@ public class Main {
             for (int i = 0, size = entities.size(); i < size; i++) {
                 CompoundTag entity = entities.get(i);
                 if ("minecraft:item_frame".equals(entity.getString("id"))) {
-                    CompoundTag item = entity.getCompound("Item");
-                    if (item == null) {
-                        //item frame is empty
-                        continue;
-                    } else if ("minecraft:filled_map".equals(item.getString("id"))) {
-                        int toId = ID_REMAPPERS.get(item.getShort("Damage") & 0xFFFF);
-                        if (toId != Integer.MIN_VALUE) {
-                            logger.info("Found map id=%d in item frame!", item.getShort("Damage"));
-                            item.putShort("Damage", (short) toId);
+                    if (processItem(entity.getCompound("Item")))   {
+                        dirty = true;
+                    }
+                }
+            }
+        }
+        {
+            ListTag<CompoundTag> tileEntities = chunk.getCompound("Level").getList("TileEntities");
+            for (int i = 0, size = tileEntities.size(); i < size; i++) {
+                ListTag<CompoundTag> items = tileEntities.get(i).getList("Items");
+                if (items == null)  {
+                    //tile entity does not have an inventory
+                    continue;
+                } else {
+                    for (int j = 0, itemsSize = items.size(); j < itemsSize; j++)   {
+                        if (processItem(items.get(j)))  {
                             dirty = true;
                         }
                     }
@@ -243,5 +251,17 @@ public class Main {
             }
         }
         return dirty;
+    }
+
+    protected static boolean processItem(CompoundTag item) {
+        if (item != null && "minecraft:filled_map".equals(item.getString("id"))) {
+            int toId = ID_REMAPPERS.get(item.getShort("Damage") & 0xFFFF);
+            if (toId != Integer.MIN_VALUE) {
+                //logger.info("Found map id=%d!", item.getShort("Damage"));
+                item.putShort("Damage", (short) toId);
+                return true;
+            }
+        }
+        return false;
     }
 }
