@@ -18,9 +18,11 @@ package net.daporkchop.worldremapper;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.PooledByteBufAllocator;
 import lombok.NonNull;
+import net.daporkchop.lib.binary.chars.DirectASCIISequence;
 import net.daporkchop.lib.binary.stream.DataIn;
 import net.daporkchop.lib.binary.stream.DataOut;
 import net.daporkchop.lib.common.function.io.IOConsumer;
+import net.daporkchop.lib.common.util.PorkUtil;
 import net.daporkchop.lib.logging.LogAmount;
 import net.daporkchop.lib.minecraft.world.format.anvil.AnvilPooledNBTArrayAllocator;
 import net.daporkchop.lib.minecraft.world.format.anvil.region.RegionConstants;
@@ -35,11 +37,17 @@ import net.daporkchop.lib.nbt.NBTOutputStream;
 import net.daporkchop.lib.nbt.alloc.NBTArrayAllocator;
 import net.daporkchop.lib.nbt.tag.notch.CompoundTag;
 import net.daporkchop.lib.nbt.tag.notch.ListTag;
+import net.daporkchop.lib.primitive.map.IntIntMap;
+import net.daporkchop.lib.primitive.map.hash.open.IntIntOpenHashMap;
+import sun.nio.ch.DirectBuffer;
 
 import java.io.File;
+import java.io.IOException;
+import java.nio.MappedByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.file.StandardOpenOption;
 import java.util.Arrays;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 import static net.daporkchop.lib.logging.Logging.*;
@@ -48,6 +56,7 @@ import static net.daporkchop.lib.logging.Logging.*;
  * @author DaPorkchop_
  */
 public class Main {
+    protected static final Pattern INPUT_PATTERN  = Pattern.compile("([0-9]+):([0-9]+)(\n|$)");
     protected static final Pattern DIM_PATTERN    = Pattern.compile("^(region|DIM-?[0-9]+)$");
     protected static final Pattern REGION_PATTERN = Pattern.compile("^r\\.(-?[0-9]+)\\.(-?[0-9]+)\\.mca$");
 
@@ -57,6 +66,8 @@ public class Main {
 
     protected static final ThreadLocal<PInflater> INFLATER_CACHE = ThreadLocal.withInitial(() -> PNatives.ZLIB.get().inflater(Zlib.ZLIB_MODE_AUTO));
     protected static final ThreadLocal<PDeflater> DEFLATER_CACHE = ThreadLocal.withInitial(() -> PNatives.ZLIB.get().deflater(4));
+
+    protected static final IntIntMap ID_REMAPPERS = new IntIntOpenHashMap();
 
     public static void main(String... args) {
         logger.enableANSI().setLogAmount(LogAmount.DEBUG);
@@ -68,6 +79,32 @@ public class Main {
 
         if (!PNatives.ZLIB.isNative()) {
             throw new IllegalStateException("Native zlib couldn't be loaded! Only supported on x86_64-linux-gnu, x86-linux-gnu and x86_64-w64-mingw32");
+        }
+
+        {
+            //load input data
+            //holy cow this is fast
+            MappedByteBuffer buffer;
+            try (FileChannel channel = FileChannel.open(new File(args[1]).toPath(), StandardOpenOption.READ)) {
+                buffer = channel.map(FileChannel.MapMode.READ_ONLY, 0L, channel.size());
+            } catch (IOException e) {
+                throw new RuntimeException(e);
+            }
+            Matcher matcher = INPUT_PATTERN.matcher(new DirectASCIISequence(((DirectBuffer) buffer).address(), buffer.capacity()));
+            while (matcher.find()) {
+                int from = Integer.parseInt(matcher.group(1));
+                int to = Integer.parseInt(matcher.group(2));
+                if (from == to) {
+                    continue;
+                } else if (ID_REMAPPERS.containsKey(from)) {
+                    logger.alert("ID %d is already being mapped to %d (duplicate entry attempts to map it to %d)", from, ID_REMAPPERS.get(from), to);
+                    return;
+                } else {
+                    ID_REMAPPERS.put(from, to);
+                }
+            }
+            PorkUtil.release(buffer);
+            logger.info("Preparing to remap %d map IDs...", ID_REMAPPERS.size());
         }
 
         File rootDir = new File(args[0]).getAbsoluteFile();
@@ -187,17 +224,20 @@ public class Main {
         {
             //iterate over entities to find item frames
             ListTag<CompoundTag> entities = chunk.getCompound("Level").getList("Entities");
-            for (int i = 0, size = entities.size(); i < size; i++)  {
+            for (int i = 0, size = entities.size(); i < size; i++) {
                 CompoundTag entity = entities.get(i);
                 if ("minecraft:item_frame".equals(entity.getString("id"))) {
                     CompoundTag item = entity.getCompound("Item");
-                    if (item == null)   {
-                        //logger.info("Found item frame with no item?!?");
+                    if (item == null) {
+                        //item frame is empty
                         continue;
-                    } else if ("minecraft:filled_map".equals(item.getString("id")))    {
-                        //logger.info("Found map id=%d in item frame!", item.getShort("Damage"));
-                        //TODO: this
-                        dirty = true;
+                    } else if ("minecraft:filled_map".equals(item.getString("id"))) {
+                        int toId = ID_REMAPPERS.get(item.getShort("Damage") & 0xFFFF);
+                        if (toId != Integer.MIN_VALUE) {
+                            logger.info("Found map id=%d in item frame!", item.getShort("Damage"));
+                            item.putShort("Damage", (short) toId);
+                            dirty = true;
+                        }
                     }
                 }
             }
