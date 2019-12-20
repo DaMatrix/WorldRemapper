@@ -193,6 +193,9 @@ public class Main {
                                     sector = chunkSectors;
 
                                     out.setInt(RegionConstants.getTimestampIndex(x, z), (int) (System.currentTimeMillis() / 1000L));
+
+                                    //release tag to allow array reuse
+                                    tag.release();
                                 } finally {
                                     if (chunk != null) {
                                         chunk.release();
