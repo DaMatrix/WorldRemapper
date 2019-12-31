@@ -19,9 +19,12 @@ import io.netty.buffer.ByteBuf;
 import io.netty.buffer.PooledByteBufAllocator;
 import lombok.NonNull;
 import net.daporkchop.lib.binary.chars.DirectASCIISequence;
+import net.daporkchop.lib.binary.oio.writer.UTF8FileWriter;
 import net.daporkchop.lib.binary.stream.DataIn;
 import net.daporkchop.lib.binary.stream.DataOut;
 import net.daporkchop.lib.common.function.io.IOConsumer;
+import net.daporkchop.lib.common.misc.file.PFiles;
+import net.daporkchop.lib.common.system.PlatformInfo;
 import net.daporkchop.lib.common.util.PorkUtil;
 import net.daporkchop.lib.logging.LogAmount;
 import net.daporkchop.lib.minecraft.world.format.anvil.AnvilPooledNBTArrayAllocator;
@@ -43,11 +46,15 @@ import sun.nio.ch.DirectBuffer;
 
 import java.io.File;
 import java.io.IOException;
+import java.io.Writer;
 import java.nio.MappedByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.file.StandardOpenOption;
 import java.util.Arrays;
+import java.util.Collection;
+import java.util.Collections;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -69,6 +76,9 @@ public class Main {
     protected static final ThreadLocal<PDeflater> DEFLATER_CACHE = ThreadLocal.withInitial(() -> PNatives.ZLIB.get().deflater(4));
 
     protected static final IntIntMap ID_REMAPPERS = new IntIntOpenHashMap();
+    protected static final Collection<Integer> ID_LIST = Collections.newSetFromMap(new ConcurrentHashMap<>());
+
+    protected static final boolean LIST_MODE = "true".equalsIgnoreCase(System.getProperty("worldremapper.list", "false"));
 
     public static void main(String... args) {
         logger.enableANSI().setLogAmount(LogAmount.DEBUG);
@@ -82,7 +92,7 @@ public class Main {
             throw new IllegalStateException("Native zlib couldn't be loaded! Only supported on x86_64-linux-gnu, x86-linux-gnu and x86_64-w64-mingw32");
         }
 
-        {
+        if (!LIST_MODE) {
             //load input data
             //holy cow this is fast
             MappedByteBuffer buffer;
@@ -106,6 +116,9 @@ public class Main {
             }
             PorkUtil.release(buffer);
             logger.info("Preparing to remap %d map IDs...", ID_REMAPPERS.size());
+        } else {
+            PFiles.ensureFileExists(new File(args[1]));
+            logger.info("Preparing to list map IDs in world \"%s\" to \"%s\"...", args[0], args[1]);
         }
 
         File rootDir = new File(args[0]).getAbsoluteFile();
@@ -134,14 +147,15 @@ public class Main {
             Arrays.stream(regions).parallel().forEach((IOConsumer<File>) file -> {
                 logger.trace("Processing region %s...", file);
 
-                ByteBuf out = PooledByteBufAllocator.DEFAULT.ioBuffer(RegionConstants.SECTOR_BYTES * (2 + 32 * 32));
-                out.writeBytes(RegionConstants.EMPTY_SECTOR).writeBytes(RegionConstants.EMPTY_SECTOR);
+                ByteBuf out = LIST_MODE ? null : PooledByteBufAllocator.DEFAULT.ioBuffer(RegionConstants.SECTOR_BYTES * (2 + 32 * 32))
+                        .writeBytes(RegionConstants.EMPTY_SECTOR)
+                        .writeBytes(RegionConstants.EMPTY_SECTOR);
                 boolean dirty = false;
                 try {
                     ByteBuf inflatedChunk = PooledByteBufAllocator.DEFAULT.ioBuffer(2097152); //2 MiB
                     try (RegionFile region = RegionFile.open(file, REGION_OPEN_OPTIONS)) {
                         PInflater inflater = INFLATER_CACHE.get();
-                        PDeflater deflater = DEFLATER_CACHE.get();
+                        PDeflater deflater = LIST_MODE ? null : DEFLATER_CACHE.get();
                         int sector = 2;
                         for (int x = 31; x >= 0; x--) {
                             for (int z = 31; z >= 0; z--) {
@@ -159,43 +173,46 @@ public class Main {
                                         tag = nbt.readTag();
                                     }
 
-                                    if (processChunk(tag)) {
-                                        //if true, the tag was modified
-                                        dirty = true;
-                                        final int oldIndex = out.writerIndex();
-                                        out.writeInt(-1);
-                                        out.writeByte(RegionConstants.ID_ZLIB);
+                                    boolean flag = processChunk(tag);
+                                    if (!LIST_MODE)  {
+                                        if (flag) {
+                                            //if true, the tag was modified
+                                            dirty = true;
+                                            final int oldIndex = out.writerIndex();
+                                            out.writeInt(-1);
+                                            out.writeByte(RegionConstants.ID_ZLIB);
 
-                                        //re-encode chunk to inflatedChunk buf
-                                        inflatedChunk.clear();
-                                        try (NBTOutputStream nbt = new NBTOutputStream(DataOut.wrap(inflatedChunk))) {
-                                            nbt.writeTag(tag);
+                                            //re-encode chunk to inflatedChunk buf
+                                            inflatedChunk.clear();
+                                            try (NBTOutputStream nbt = new NBTOutputStream(DataOut.wrap(inflatedChunk))) {
+                                                nbt.writeTag(tag);
+                                            }
+
+                                            //re-compress chunk directly to output buffer
+                                            deflater.deflate(inflatedChunk, out);
+                                            deflater.reset();
+
+                                            //update chunk length in bytes now that it is known
+                                            out.setInt(oldIndex, out.writerIndex() - oldIndex - 4);
+                                            logger.info("New size: %d bytes", out.writerIndex() - oldIndex - 4);
+                                        } else {
+                                            //simply write compressed chunk straight to output buffer
+                                            out.writeInt(chunk.resetReaderIndex().readableBytes());
+                                            out.writeBytes(chunk);
                                         }
 
-                                        //re-compress chunk directly to output buffer
-                                        deflater.deflate(inflatedChunk, out);
-                                        deflater.reset();
+                                        //pad chunk
+                                        out.writeBytes(RegionConstants.EMPTY_SECTOR, 0, ((out.writerIndex() - 1 >> 12) + 1 << 12) - out.writerIndex());
 
-                                        //update chunk length in bytes now that it is known
-                                        out.setInt(oldIndex, out.writerIndex() - oldIndex - 4);
-                                        logger.info("New size: %d bytes", out.writerIndex() - oldIndex - 4);
-                                    } else {
-                                        //simply write compressed chunk straight to output buffer
-                                        out.writeInt(chunk.resetReaderIndex().readableBytes());
-                                        out.writeBytes(chunk);
+                                        final int chunkSectors = (out.writerIndex() - 1 >> 12) + 1;
+                                        out.setInt(RegionConstants.getOffsetIndex(x, z), (chunkSectors - sector) | (sector << 8));
+                                        sector = chunkSectors;
+
+                                        out.setInt(RegionConstants.getTimestampIndex(x, z), (int) (System.currentTimeMillis() / 1000L));
+
+                                        //release tag to allow array reuse
+                                        tag.release();
                                     }
-
-                                    //pad chunk
-                                    out.writeBytes(RegionConstants.EMPTY_SECTOR, 0, ((out.writerIndex() - 1 >> 12) + 1 << 12) - out.writerIndex());
-
-                                    final int chunkSectors = (out.writerIndex() - 1 >> 12) + 1;
-                                    out.setInt(RegionConstants.getOffsetIndex(x, z), (chunkSectors - sector) | (sector << 8));
-                                    sector = chunkSectors;
-
-                                    out.setInt(RegionConstants.getTimestampIndex(x, z), (int) (System.currentTimeMillis() / 1000L));
-
-                                    //release tag to allow array reuse
-                                    tag.release();
                                 } finally {
                                     if (chunk != null) {
                                         chunk.release();
@@ -206,7 +223,7 @@ public class Main {
                     } finally {
                         inflatedChunk.release();
                     }
-                    if (dirty) {
+                    if (!LIST_MODE && dirty) {
                         logger.debug("Region %s was modified, overwriting...", file);
                         //write region again if dirty
                         try (FileChannel channel = FileChannel.open(file.toPath(), StandardOpenOption.WRITE, StandardOpenOption.TRUNCATE_EXISTING)) {
@@ -217,9 +234,25 @@ public class Main {
                         }
                     }
                 } finally {
-                    out.release();
+                    if (!LIST_MODE) {
+                        out.release();
+                    }
                 }
             });
+        }
+
+        if (LIST_MODE) {
+            logger.info("Storing IDs...");
+            try (Writer writer = new UTF8FileWriter(PFiles.ensureFileExists(new File(args[1])))) {
+                ID_LIST.stream()
+                        .sorted()
+                        .forEachOrdered((IOConsumer<Integer>) id -> {
+                            writer.append(id.toString());
+                            writer.append(PlatformInfo.OPERATING_SYSTEM.lineEnding());
+                        });
+            } catch (IOException e) {
+                throw new RuntimeException(e);
+            }
         }
     }
 
@@ -258,11 +291,16 @@ public class Main {
 
     protected static boolean processItem(CompoundTag item) {
         if (item != null && "minecraft:filled_map".equals(item.getString("id"))) {
-            int toId = ID_REMAPPERS.get(item.getShort("Damage") & 0xFFFF);
-            if (toId != Integer.MIN_VALUE) {
-                //logger.info("Found map id=%d!", item.getShort("Damage"));
-                item.putShort("Damage", (short) toId);
-                return true;
+            int fromId = item.getShort("Damage") & 0xFFFF;
+            if (LIST_MODE)  {
+                ID_LIST.add(fromId);
+            } else {
+                int toId = ID_REMAPPERS.get(fromId);
+                if (toId != Integer.MIN_VALUE) {
+                    //logger.info("Found map id=%d!", item.getShort("Damage"));
+                    item.putShort("Damage", (short) toId);
+                    return true;
+                }
             }
         }
         return false;
