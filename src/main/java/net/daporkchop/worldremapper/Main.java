@@ -95,13 +95,19 @@ public class Main {
                 new DoubleTag("", Double.parseDouble(args[2])),
                 new DoubleTag("", Double.parseDouble(args[3]))
         ));
+
+        dataTag.putInt("SpawnX", Integer.parseInt(args[4]));
+        dataTag.putInt("SpawnY", Integer.parseInt(args[5]));
+        dataTag.putInt("SpawnZ", Integer.parseInt(args[6]));
+
         playerTag.putList("Rotation", Arrays.asList(
-                new FloatTag("", Float.parseFloat(args[4])),
-                new FloatTag("", Float.parseFloat(args[5]))
+                new FloatTag("", Float.parseFloat(args[7])),
+                new FloatTag("", Float.parseFloat(args[8]))
         ));
-        dataTag.putLong("LastPlayed", Long.parseUnsignedLong(args[6]));
-        dataTag.putLong("RandomSeed", Long.parseUnsignedLong(args[7]));
-        dataTag.putString("LevelName", args[8]);
+
+        dataTag.putLong("LastPlayed", Long.parseUnsignedLong(args[9]));
+        dataTag.putLong("RandomSeed", Long.parseUnsignedLong(args[10]));
+        dataTag.putString("LevelName", args[11]);
 
         new NBTOutputStream(new ByteBufOutputStream(uncompressed.clear())).writeTag(tag);
         ByteBuf compressed = Unpooled.directBuffer();
