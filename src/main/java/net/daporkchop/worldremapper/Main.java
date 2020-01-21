@@ -84,7 +84,9 @@ public class Main {
         dataTag.putString("generatorOptions", ";0");
         dataTag.putByte("MapFeatures", (byte) 0);
         dataTag.putByte("raining", (byte) 0);
-        dataTag.putInt("thunderTime", 0);
+        dataTag.putInt("thunderTime", Integer.MAX_VALUE - 1);
+        dataTag.putInt("rainTime", Integer.MAX_VALUE - 1);
+        dataTag.putInt("clearWeatherTime", Integer.MAX_VALUE - 1);
 
         playerTag.putList("EnderItems", Collections.emptyList());
         playerTag.putList("Inventory", Collections.emptyList());
