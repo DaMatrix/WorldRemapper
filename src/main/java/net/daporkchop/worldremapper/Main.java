@@ -21,6 +21,7 @@ import io.netty.buffer.ByteBufOutputStream;
 import io.netty.buffer.Unpooled;
 import net.daporkchop.lib.binary.netty.PUnpooled;
 import net.daporkchop.lib.logging.LogAmount;
+import net.daporkchop.lib.logging.console.ansi.ANSIMessagePrinter;
 import net.daporkchop.lib.natives.PNatives;
 import net.daporkchop.lib.natives.zlib.PDeflater;
 import net.daporkchop.lib.natives.zlib.PInflater;
@@ -46,7 +47,9 @@ import static net.daporkchop.lib.logging.Logging.*;
  */
 public class Main {
     public static void main(String... args) throws IOException {
-        logger.enableANSI().setLogAmount(LogAmount.DEBUG);
+        logger.setLogAmount(LogAmount.DEBUG);
+        logger.setDelegate("console", logger.getLogLevels(), new ANSIMessagePrinter());
+        logger.info("Enabling ANSI formatting manually :)");
 
         Thread.currentThread().setUncaughtExceptionHandler((thread, ex) -> {
             logger.alert(ex);
@@ -106,7 +109,7 @@ public class Main {
         ));
 
         dataTag.putLong("LastPlayed", Long.parseUnsignedLong(args[9]));
-        dataTag.putLong("RandomSeed", Long.parseUnsignedLong(args[10]));
+        dataTag.putLong("RandomSeed", Long.parseLong(args[10]));
         dataTag.putString("LevelName", args[11]);
 
         new NBTOutputStream(new ByteBufOutputStream(uncompressed.clear())).writeTag(tag);
