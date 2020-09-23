@@ -210,8 +210,8 @@ public class Main {
             if (section.getByte("Y") == 15) {
                 byte[] blocks = section.getByteArray("Blocks");
                 SectionLayer meta = new SectionLayer(section.getByteArray("Data"));
-                for (int x = 0; x < 15; x++)    {
-                    for (int z = 0; z < 15; z++){
+                for (int x = 0; x < 16; x++)    {
+                    for (int z = 0; z < 16; z++){
                         int index = (0xF << 8) | (z << 4) | x;
                         if (blocks[index] != 0 || meta.get(x, 15, z) != 0) {
                             blocks[index] = (byte) 0;
