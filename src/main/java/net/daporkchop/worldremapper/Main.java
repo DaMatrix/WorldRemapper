@@ -1,7 +1,7 @@
 /*
  * Adapted from the Wizardry License
  *
- * Copyright (c) 2019-2019 DaPorkchop_ and contributors
+ * Copyright (c) 2019-2020 DaPorkchop_ and contributors
  *
  * Permission is hereby granted to any persons and/or organizations using this software to copy, modify, merge, publish, and distribute it. Said persons and/or organizations are not allowed to use the software or any derivatives of the work for commercial use or any other means to generate income, nor are they allowed to claim this software as their own.
  *
@@ -26,20 +26,22 @@ import net.daporkchop.lib.common.function.io.IOConsumer;
 import net.daporkchop.lib.common.misc.file.PFiles;
 import net.daporkchop.lib.common.system.PlatformInfo;
 import net.daporkchop.lib.common.util.PorkUtil;
+import net.daporkchop.lib.compression.PDeflater;
+import net.daporkchop.lib.compression.PInflater;
+import net.daporkchop.lib.compression.zlib.Zlib;
 import net.daporkchop.lib.logging.LogAmount;
 import net.daporkchop.lib.minecraft.world.format.anvil.AnvilPooledNBTArrayAllocator;
 import net.daporkchop.lib.minecraft.world.format.anvil.region.RegionConstants;
 import net.daporkchop.lib.minecraft.world.format.anvil.region.RegionFile;
 import net.daporkchop.lib.minecraft.world.format.anvil.region.RegionOpenOptions;
-import net.daporkchop.lib.natives.PNatives;
-import net.daporkchop.lib.natives.zlib.PDeflater;
-import net.daporkchop.lib.natives.zlib.PInflater;
-import net.daporkchop.lib.natives.zlib.Zlib;
 import net.daporkchop.lib.nbt.NBTInputStream;
 import net.daporkchop.lib.nbt.NBTOutputStream;
 import net.daporkchop.lib.nbt.alloc.NBTArrayAllocator;
+import net.daporkchop.lib.nbt.tag.Tag;
 import net.daporkchop.lib.nbt.tag.notch.CompoundTag;
 import net.daporkchop.lib.nbt.tag.notch.ListTag;
+import net.daporkchop.lib.nbt.tag.notch.ShortTag;
+import net.daporkchop.lib.nbt.tag.notch.StringTag;
 import net.daporkchop.lib.primitive.map.IntIntMap;
 import net.daporkchop.lib.primitive.map.hash.open.IntIntOpenHashMap;
 import sun.nio.ch.DirectBuffer;
@@ -72,8 +74,8 @@ public class Main {
 
     protected static final RegionOpenOptions REGION_OPEN_OPTIONS = new RegionOpenOptions().access(RegionFile.Access.READ_ONLY).mode(RegionFile.Mode.MMAP_FULL);
 
-    protected static final ThreadLocal<PInflater> INFLATER_CACHE = ThreadLocal.withInitial(() -> PNatives.ZLIB.get().inflater(Zlib.ZLIB_MODE_AUTO));
-    protected static final ThreadLocal<PDeflater> DEFLATER_CACHE = ThreadLocal.withInitial(() -> PNatives.ZLIB.get().deflater(4));
+    protected static final ThreadLocal<PInflater> INFLATER_CACHE = ThreadLocal.withInitial(Zlib.PROVIDER::inflaterAuto);
+    protected static final ThreadLocal<PDeflater> DEFLATER_CACHE = ThreadLocal.withInitial(Zlib.PROVIDER::deflater);
 
     protected static final IntIntMap ID_REMAPPERS = new IntIntOpenHashMap();
     protected static final Collection<Integer> ID_LIST = Collections.newSetFromMap(new ConcurrentHashMap<>());
@@ -88,7 +90,7 @@ public class Main {
             System.exit(1);
         });
 
-        if (!PNatives.ZLIB.isNative()) {
+        if (!Zlib.PROVIDER.isNative()) {
             throw new IllegalStateException("Native zlib couldn't be loaded! Only supported on x86_64-linux-gnu, x86-linux-gnu and x86_64-w64-mingw32");
         }
 
@@ -165,8 +167,7 @@ public class Main {
                                 inflatedChunk.clear();
                                 ByteBuf chunk = region.readDirect(x, z).markReaderIndex().skipBytes(1);
                                 try {
-                                    inflater.inflate(chunk, inflatedChunk);
-                                    inflater.reset();
+                                    inflater.fullInflateGrowing(chunk, inflatedChunk);
 
                                     CompoundTag tag;
                                     try (NBTInputStream nbt = new NBTInputStream(DataIn.wrap(inflatedChunk), NBT_ALLOC)) {
@@ -189,8 +190,7 @@ public class Main {
                                             }
 
                                             //re-compress chunk directly to output buffer
-                                            deflater.deflate(inflatedChunk, out);
-                                            deflater.reset();
+                                            deflater.fullDeflateGrowing(inflatedChunk, out);
 
                                             //update chunk length in bytes now that it is known
                                             out.setInt(oldIndex, out.writerIndex() - oldIndex - 4);
@@ -290,7 +290,13 @@ public class Main {
     }
 
     protected static boolean processItem(CompoundTag item) {
-        if (item != null && "minecraft:filled_map".equals(item.getString("id"))) {
+        if (item == null)   {
+            return false;
+        }
+
+        Tag id = item.get("id");
+        if ((id instanceof StringTag && "minecraft:filled_map".equals(((StringTag) id).getValue()))
+            || (id instanceof ShortTag && ((ShortTag) id).getValue() == 358)) { //support legacy item IDs
             int fromId = item.getShort("Damage") & 0xFFFF;
             if (LIST_MODE)  {
                 ID_LIST.add(fromId);
