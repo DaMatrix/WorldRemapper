@@ -42,8 +42,6 @@ import net.daporkchop.lib.nbt.tag.notch.CompoundTag;
 import net.daporkchop.lib.nbt.tag.notch.ListTag;
 import net.daporkchop.lib.nbt.tag.notch.ShortTag;
 import net.daporkchop.lib.nbt.tag.notch.StringTag;
-import net.daporkchop.lib.primitive.map.IntIntMap;
-import net.daporkchop.lib.primitive.map.hash.open.IntIntOpenHashMap;
 import sun.nio.ch.DirectBuffer;
 
 import java.io.File;
@@ -55,10 +53,10 @@ import java.nio.file.StandardOpenOption;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
-import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.stream.IntStream;
 
 import static net.daporkchop.lib.logging.Logging.*;
 
@@ -66,8 +64,8 @@ import static net.daporkchop.lib.logging.Logging.*;
  * @author DaPorkchop_
  */
 public class Main {
-    protected static final Pattern INPUT_PATTERN  = Pattern.compile("([0-9]+):([0-9]+)(\r?\n|$)");
-    protected static final Pattern DIM_PATTERN    = Pattern.compile("^(region|DIM-?[0-9]+)$");
+    protected static final Pattern INPUT_PATTERN = Pattern.compile("([0-9]+):([0-9]+)(\r?\n|$)");
+    protected static final Pattern DIM_PATTERN = Pattern.compile("^(region|DIM-?[0-9]+)$");
     protected static final Pattern REGION_PATTERN = Pattern.compile("^r\\.(-?[0-9]+)\\.(-?[0-9]+)\\.mca$");
 
     protected static final NBTArrayAllocator NBT_ALLOC = new AnvilPooledNBTArrayAllocator(16 * 3, 16); //exactly enough to load a full chunk with extended block IDs
@@ -77,7 +75,7 @@ public class Main {
     protected static final ThreadLocal<PInflater> INFLATER_CACHE = ThreadLocal.withInitial(Zlib.PROVIDER::inflaterAuto);
     protected static final ThreadLocal<PDeflater> DEFLATER_CACHE = ThreadLocal.withInitial(Zlib.PROVIDER::deflater);
 
-    protected static final IntIntMap ID_REMAPPERS = new IntIntOpenHashMap();
+    protected static final int[] ID_REMAPPERS = IntStream.range(0, 1 << 16).toArray();
     protected static final Collection<Integer> ID_LIST = Collections.newSetFromMap(new ConcurrentHashMap<>());
 
     protected static final boolean LIST_MODE = "true".equalsIgnoreCase(System.getProperty("worldremapper.list", "false"));
@@ -104,20 +102,23 @@ public class Main {
                 throw new RuntimeException(e);
             }
             Matcher matcher = INPUT_PATTERN.matcher(new DirectASCIISequence(((DirectBuffer) buffer).address(), buffer.capacity()));
+
+            int replacementCount = 0;
             while (matcher.find()) {
                 int from = Integer.parseInt(matcher.group(1));
                 int to = Integer.parseInt(matcher.group(2));
                 if (from == to) {
                     continue;
-                } else if (ID_REMAPPERS.containsKey(from)) {
-                    logger.alert("ID %d is already being mapped to %d (duplicate entry attempts to map it to %d)", from, ID_REMAPPERS.get(from), to);
+                } else if (ID_REMAPPERS[from] != from) {
+                    logger.alert("ID %1$d is already being mapped to %1$d", from);
                     return;
                 } else {
-                    ID_REMAPPERS.put(from, to);
+                    ID_REMAPPERS[from] = to;
                 }
+                replacementCount++;
             }
             PorkUtil.release(buffer);
-            logger.info("Preparing to remap %d map IDs...", ID_REMAPPERS.size());
+            logger.info("Preparing to remap %d map IDs...", replacementCount);
         } else {
             PFiles.ensureFileExists(new File(args[1]));
             logger.info("Preparing to list map IDs in world \"%s\" to \"%s\"...", args[0], args[1]);
@@ -131,7 +132,9 @@ public class Main {
         }
 
         File[] dims = rootDir.listFiles((file, name) -> DIM_PATTERN.matcher(name).matches());
-        if (dims == null) throw new NullPointerException("dims");
+        if (dims == null) {
+            throw new NullPointerException("dims");
+        }
         logger.info("Processing %d dimensions...", dims.length);
 
         for (File dim : dims) {
@@ -143,7 +146,9 @@ public class Main {
                 }
             }
             File[] regions = dim.listFiles((file, name) -> REGION_PATTERN.matcher(name).matches());
-            if (regions == null) throw new NullPointerException("regions");
+            if (regions == null) {
+                throw new NullPointerException("regions");
+            }
             logger.info("Processing dimension %s, with %d regions...", dim, regions.length);
 
             Arrays.stream(regions).parallel().forEach((IOConsumer<File>) file -> {
@@ -175,7 +180,7 @@ public class Main {
                                     }
 
                                     boolean flag = processChunk(tag);
-                                    if (!LIST_MODE)  {
+                                    if (!LIST_MODE) {
                                         if (flag) {
                                             //if true, the tag was modified
                                             dirty = true;
@@ -264,7 +269,7 @@ public class Main {
             for (int i = 0, size = entities.size(); i < size; i++) {
                 CompoundTag entity = entities.get(i);
                 if ("minecraft:item_frame".equals(entity.getString("id"))) {
-                    if (processItem(entity.getCompound("Item")))   {
+                    if (processItem(entity.getCompound("Item"))) {
                         dirty = true;
                     }
                 }
@@ -274,12 +279,12 @@ public class Main {
             ListTag<CompoundTag> tileEntities = chunk.getCompound("Level").getList("TileEntities");
             for (int i = 0, size = tileEntities.size(); i < size; i++) {
                 ListTag<CompoundTag> items = tileEntities.get(i).getList("Items");
-                if (items == null)  {
+                if (items == null) {
                     //tile entity does not have an inventory
                     continue;
                 } else {
-                    for (int j = 0, itemsSize = items.size(); j < itemsSize; j++)   {
-                        if (processItem(items.get(j)))  {
+                    for (int j = 0, itemsSize = items.size(); j < itemsSize; j++) {
+                        if (processItem(items.get(j))) {
                             dirty = true;
                         }
                     }
@@ -290,7 +295,7 @@ public class Main {
     }
 
     protected static boolean processItem(CompoundTag item) {
-        if (item == null)   {
+        if (item == null) {
             return false;
         }
 
@@ -298,11 +303,11 @@ public class Main {
         if ((id instanceof StringTag && "minecraft:filled_map".equals(((StringTag) id).getValue()))
             || (id instanceof ShortTag && ((ShortTag) id).getValue() == 358)) { //support legacy item IDs
             int fromId = item.getShort("Damage") & 0xFFFF;
-            if (LIST_MODE)  {
+            if (LIST_MODE) {
                 ID_LIST.add(fromId);
             } else {
-                int toId = ID_REMAPPERS.get(fromId);
-                if (toId != Integer.MIN_VALUE) {
+                int toId = ID_REMAPPERS[fromId];
+                if (toId != fromId) {
                     //logger.info("Found map id=%d!", item.getShort("Damage"));
                     item.putShort("Damage", (short) toId);
                     return true;
