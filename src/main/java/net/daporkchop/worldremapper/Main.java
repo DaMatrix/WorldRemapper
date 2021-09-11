@@ -1,7 +1,7 @@
 /*
  * Adapted from the Wizardry License
  *
- * Copyright (c) 2019-2020 DaPorkchop_ and contributors
+ * Copyright (c) 2019-2021 DaPorkchop_ and contributors
  *
  * Permission is hereby granted to any persons and/or organizations using this software to copy, modify, merge, publish, and distribute it. Said persons and/or organizations are not allowed to use the software or any derivatives of the work for commercial use or any other means to generate income, nor are they allowed to claim this software as their own.
  *
@@ -18,14 +18,9 @@ package net.daporkchop.worldremapper;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.PooledByteBufAllocator;
 import lombok.NonNull;
-import net.daporkchop.lib.binary.chars.DirectASCIISequence;
-import net.daporkchop.lib.binary.oio.writer.UTF8FileWriter;
 import net.daporkchop.lib.binary.stream.DataIn;
 import net.daporkchop.lib.binary.stream.DataOut;
 import net.daporkchop.lib.common.function.io.IOConsumer;
-import net.daporkchop.lib.common.misc.file.PFiles;
-import net.daporkchop.lib.common.system.PlatformInfo;
-import net.daporkchop.lib.common.util.PorkUtil;
 import net.daporkchop.lib.compression.PDeflater;
 import net.daporkchop.lib.compression.PInflater;
 import net.daporkchop.lib.compression.zlib.Zlib;
@@ -42,21 +37,12 @@ import net.daporkchop.lib.nbt.tag.notch.CompoundTag;
 import net.daporkchop.lib.nbt.tag.notch.ListTag;
 import net.daporkchop.lib.nbt.tag.notch.ShortTag;
 import net.daporkchop.lib.nbt.tag.notch.StringTag;
-import sun.nio.ch.DirectBuffer;
 
 import java.io.File;
-import java.io.IOException;
-import java.io.Writer;
-import java.nio.MappedByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.file.StandardOpenOption;
 import java.util.Arrays;
-import java.util.Collection;
-import java.util.Collections;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.regex.Matcher;
 import java.util.regex.Pattern;
-import java.util.stream.IntStream;
 
 import static net.daporkchop.lib.logging.Logging.*;
 
@@ -64,7 +50,6 @@ import static net.daporkchop.lib.logging.Logging.*;
  * @author DaPorkchop_
  */
 public class Main {
-    protected static final Pattern INPUT_PATTERN = Pattern.compile("([0-9]+):([0-9]+)(\r?\n|$)");
     protected static final Pattern DIM_PATTERN = Pattern.compile("^(region|DIM-?[0-9]+)$");
     protected static final Pattern REGION_PATTERN = Pattern.compile("^r\\.(-?[0-9]+)\\.(-?[0-9]+)\\.mca$");
 
@@ -75,10 +60,9 @@ public class Main {
     protected static final ThreadLocal<PInflater> INFLATER_CACHE = ThreadLocal.withInitial(Zlib.PROVIDER::inflaterAuto);
     protected static final ThreadLocal<PDeflater> DEFLATER_CACHE = ThreadLocal.withInitial(Zlib.PROVIDER::deflater);
 
-    protected static final int[] ID_REMAPPERS = IntStream.range(0, 1 << 16).toArray();
-    protected static final Collection<Integer> ID_LIST = Collections.newSetFromMap(new ConcurrentHashMap<>());
+    protected static final byte[] EMPTY_BYTE_ARRAY_2048 = new byte[2048];
 
-    protected static final boolean LIST_MODE = "true".equalsIgnoreCase(System.getProperty("worldremapper.list", "false"));
+    protected static final boolean SKYLIGHT = Boolean.parseBoolean(System.getProperty("lightfixer.skylight", "true"));
 
     public static void main(String... args) {
         logger.enableANSI().setLogAmount(LogAmount.DEBUG);
@@ -92,37 +76,7 @@ public class Main {
             throw new IllegalStateException("Native zlib couldn't be loaded! Only supported on x86_64-linux-gnu, x86-linux-gnu and x86_64-w64-mingw32");
         }
 
-        if (!LIST_MODE) {
-            //load input data
-            //holy cow this is fast
-            MappedByteBuffer buffer;
-            try (FileChannel channel = FileChannel.open(new File(args[1]).toPath(), StandardOpenOption.READ)) {
-                buffer = channel.map(FileChannel.MapMode.READ_ONLY, 0L, channel.size());
-            } catch (IOException e) {
-                throw new RuntimeException(e);
-            }
-            Matcher matcher = INPUT_PATTERN.matcher(new DirectASCIISequence(((DirectBuffer) buffer).address(), buffer.capacity()));
-
-            int replacementCount = 0;
-            while (matcher.find()) {
-                int from = Integer.parseInt(matcher.group(1));
-                int to = Integer.parseInt(matcher.group(2));
-                if (from == to) {
-                    continue;
-                } else if (ID_REMAPPERS[from] != from) {
-                    logger.alert("ID %1$d is already being mapped to %1$d", from);
-                    return;
-                } else {
-                    ID_REMAPPERS[from] = to;
-                }
-                replacementCount++;
-            }
-            PorkUtil.release(buffer);
-            logger.info("Preparing to remap %d map IDs...", replacementCount);
-        } else {
-            PFiles.ensureFileExists(new File(args[1]));
-            logger.info("Preparing to list map IDs in world \"%s\" to \"%s\"...", args[0], args[1]);
-        }
+        logger.info("Preparing to fix block/sky lighting in world \"%s\"...", args[0]);
 
         File rootDir = new File(args[0]).getAbsoluteFile();
         if (!rootDir.exists()) {
@@ -154,7 +108,7 @@ public class Main {
             Arrays.stream(regions).parallel().forEach((IOConsumer<File>) file -> {
                 logger.trace("Processing region %s...", file);
 
-                ByteBuf out = LIST_MODE ? null : PooledByteBufAllocator.DEFAULT.ioBuffer(RegionConstants.SECTOR_BYTES * (2 + 32 * 32))
+                ByteBuf out = PooledByteBufAllocator.DEFAULT.ioBuffer(RegionConstants.SECTOR_BYTES * (2 + 32 * 32))
                         .writeBytes(RegionConstants.EMPTY_SECTOR)
                         .writeBytes(RegionConstants.EMPTY_SECTOR);
                 boolean dirty = false;
@@ -162,7 +116,7 @@ public class Main {
                     ByteBuf inflatedChunk = PooledByteBufAllocator.DEFAULT.ioBuffer(2097152); //2 MiB
                     try (RegionFile region = RegionFile.open(file, REGION_OPEN_OPTIONS)) {
                         PInflater inflater = INFLATER_CACHE.get();
-                        PDeflater deflater = LIST_MODE ? null : DEFLATER_CACHE.get();
+                        PDeflater deflater = DEFLATER_CACHE.get();
                         int sector = 2;
                         for (int x = 31; x >= 0; x--) {
                             for (int z = 31; z >= 0; z--) {
@@ -175,49 +129,46 @@ public class Main {
                                     inflater.fullInflateGrowing(chunk, inflatedChunk);
 
                                     CompoundTag tag;
-                                    try (NBTInputStream nbt = new NBTInputStream(DataIn.wrap(inflatedChunk), NBT_ALLOC)) {
+                                    try (NBTInputStream nbt = new NBTInputStream(DataIn.wrap(inflatedChunk).asInputStream(), NBT_ALLOC)) {
                                         tag = nbt.readTag();
                                     }
 
                                     boolean flag = processChunk(tag);
-                                    if (!LIST_MODE) {
-                                        if (flag) {
-                                            //if true, the tag was modified
-                                            dirty = true;
-                                            final int oldIndex = out.writerIndex();
-                                            out.writeInt(-1);
-                                            out.writeByte(RegionConstants.ID_ZLIB);
+                                    if (flag) {
+                                        //if true, the tag was modified
+                                        dirty = true;
+                                        final int oldIndex = out.writerIndex();
+                                        out.writeInt(-1);
+                                        out.writeByte(RegionConstants.ID_ZLIB);
 
-                                            //re-encode chunk to inflatedChunk buf
-                                            inflatedChunk.clear();
-                                            try (NBTOutputStream nbt = new NBTOutputStream(DataOut.wrap(inflatedChunk))) {
-                                                nbt.writeTag(tag);
-                                            }
-
-                                            //re-compress chunk directly to output buffer
-                                            deflater.fullDeflateGrowing(inflatedChunk, out);
-
-                                            //update chunk length in bytes now that it is known
-                                            out.setInt(oldIndex, out.writerIndex() - oldIndex - 4);
-                                            logger.info("New size: %d bytes", out.writerIndex() - oldIndex - 4);
-                                        } else {
-                                            //simply write compressed chunk straight to output buffer
-                                            out.writeInt(chunk.resetReaderIndex().readableBytes());
-                                            out.writeBytes(chunk);
+                                        //re-encode chunk to inflatedChunk buf
+                                        inflatedChunk.clear();
+                                        try (NBTOutputStream nbt = new NBTOutputStream(DataOut.wrap(inflatedChunk).asOutputStream())) {
+                                            nbt.writeTag(tag);
                                         }
 
-                                        //pad chunk
-                                        out.writeBytes(RegionConstants.EMPTY_SECTOR, 0, ((out.writerIndex() - 1 >> 12) + 1 << 12) - out.writerIndex());
+                                        //re-compress chunk directly to output buffer
+                                        deflater.fullDeflateGrowing(inflatedChunk, out);
 
-                                        final int chunkSectors = (out.writerIndex() - 1 >> 12) + 1;
-                                        out.setInt(RegionConstants.getOffsetIndex(x, z), (chunkSectors - sector) | (sector << 8));
-                                        sector = chunkSectors;
-
-                                        out.setInt(RegionConstants.getTimestampIndex(x, z), (int) (System.currentTimeMillis() / 1000L));
-
-                                        //release tag to allow array reuse
-                                        tag.release();
+                                        //update chunk length in bytes now that it is known
+                                        out.setInt(oldIndex, out.writerIndex() - oldIndex - 4);
+                                    } else {
+                                        //simply write compressed chunk straight to output buffer
+                                        out.writeInt(chunk.resetReaderIndex().readableBytes());
+                                        out.writeBytes(chunk);
                                     }
+
+                                    //pad chunk
+                                    out.writeBytes(RegionConstants.EMPTY_SECTOR, 0, ((out.writerIndex() - 1 >> 12) + 1 << 12) - out.writerIndex());
+
+                                    final int chunkSectors = (out.writerIndex() - 1 >> 12) + 1;
+                                    out.setInt(RegionConstants.getOffsetIndex(x, z), (chunkSectors - sector) | (sector << 8));
+                                    sector = chunkSectors;
+
+                                    out.setInt(RegionConstants.getTimestampIndex(x, z), (int) (System.currentTimeMillis() / 1000L));
+
+                                    //release tag to allow array reuse
+                                    tag.release();
                                 } finally {
                                     if (chunk != null) {
                                         chunk.release();
@@ -228,7 +179,7 @@ public class Main {
                     } finally {
                         inflatedChunk.release();
                     }
-                    if (!LIST_MODE && dirty) {
+                    if (dirty) {
                         logger.debug("Region %s was modified, overwriting...", file);
                         //write region again if dirty
                         try (FileChannel channel = FileChannel.open(file.toPath(), StandardOpenOption.WRITE, StandardOpenOption.TRUNCATE_EXISTING)) {
@@ -239,81 +190,29 @@ public class Main {
                         }
                     }
                 } finally {
-                    if (!LIST_MODE) {
-                        out.release();
-                    }
+                    out.release();
                 }
             });
-        }
-
-        if (LIST_MODE) {
-            logger.info("Storing IDs...");
-            try (Writer writer = new UTF8FileWriter(PFiles.ensureFileExists(new File(args[1])))) {
-                ID_LIST.stream()
-                        .sorted()
-                        .forEachOrdered((IOConsumer<Integer>) id -> {
-                            writer.append(id.toString());
-                            writer.append(PlatformInfo.OPERATING_SYSTEM.lineEnding());
-                        });
-            } catch (IOException e) {
-                throw new RuntimeException(e);
-            }
         }
     }
 
     protected static boolean processChunk(@NonNull CompoundTag chunk) {
         boolean dirty = false;
         {
-            //iterate over entities to find item frames
-            ListTag<CompoundTag> entities = chunk.getCompound("Level").getList("Entities");
-            for (int i = 0, size = entities.size(); i < size; i++) {
-                CompoundTag entity = entities.get(i);
-                if ("minecraft:item_frame".equals(entity.getString("id"))) {
-                    if (processItem(entity.getCompound("Item"))) {
-                        dirty = true;
-                    }
+            //iterate over sections to find missing block/sky light
+            ListTag<CompoundTag> sections = chunk.getCompound("Level").getList("Sections");
+            for (int i = 0, size = sections.size(); i < size; i++) {
+                CompoundTag section = sections.get(i);
+                if (!section.contains("BlockLight")) {
+                    section.putByteArray("BlockLight", EMPTY_BYTE_ARRAY_2048);
+                    dirty = true;
                 }
-            }
-        }
-        {
-            ListTag<CompoundTag> tileEntities = chunk.getCompound("Level").getList("TileEntities");
-            for (int i = 0, size = tileEntities.size(); i < size; i++) {
-                ListTag<CompoundTag> items = tileEntities.get(i).getList("Items");
-                if (items == null) {
-                    //tile entity does not have an inventory
-                    continue;
-                } else {
-                    for (int j = 0, itemsSize = items.size(); j < itemsSize; j++) {
-                        if (processItem(items.get(j))) {
-                            dirty = true;
-                        }
-                    }
+                if (SKYLIGHT && !section.contains("SkyLight")) {
+                    section.putByteArray("SkyLight", EMPTY_BYTE_ARRAY_2048);
+                    dirty = true;
                 }
             }
         }
         return dirty;
-    }
-
-    protected static boolean processItem(CompoundTag item) {
-        if (item == null) {
-            return false;
-        }
-
-        Tag id = item.get("id");
-        if ((id instanceof StringTag && "minecraft:filled_map".equals(((StringTag) id).getValue()))
-            || (id instanceof ShortTag && ((ShortTag) id).getValue() == 358)) { //support legacy item IDs
-            int fromId = item.getShort("Damage") & 0xFFFF;
-            if (LIST_MODE) {
-                ID_LIST.add(fromId);
-            } else {
-                int toId = ID_REMAPPERS[fromId];
-                if (toId != fromId) {
-                    //logger.info("Found map id=%d!", item.getShort("Damage"));
-                    item.putShort("Damage", (short) toId);
-                    return true;
-                }
-            }
-        }
-        return false;
     }
 }
